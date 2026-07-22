@@ -2862,6 +2862,9 @@ const CadViewer = forwardRef(function CadViewer({
       }
 
       const blob = await blobPromise;
+      if (mode === "blob") {
+        return blob;
+      }
       return triggerBlobDownload(blob, { filename });
     },
     getPerspective() {

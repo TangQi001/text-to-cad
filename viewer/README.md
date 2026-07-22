@@ -20,6 +20,8 @@ CAD references, and verify generated assets without leaving the browser.
 - Can regenerate STEP GLB/topology artifacts when the CAD Python runtime is
   available.
 - Provides optional MoveIt2 websocket controls for SRDF IK and planning.
+- Generates reference-guided images from the current rendered view through a
+  user-configured OpenAI-compatible image edit endpoint in the local Viewer.
 
 ## Quick Start
 
@@ -178,6 +180,23 @@ path prefix for model catalog uploads.
 
 Production builds contain the frontend and initial catalog module only. CAD
 assets are served by a backend and are not copied into `dist/`.
+
+## Current-view image generation
+
+Open a rendered file, expand **Metadata**, then expand **Generate image**. The
+local Viewer captures the current camera, display, clipping, exploded-view, and
+drawing state as a PNG and sends it with the prompt to the configured
+OpenAI-compatible `images/edits` endpoint.
+
+The nested **Settings** disclosure accepts a Base URL, API key, and model. The
+Base URL and model are durable browser preferences; the API key is tab-local
+and is removed when that browser tab closes. The key is sent only for an
+explicit generation request and is never written by the Viewer backend. Result
+images can be opened at full size and copied with either the provided button or
+the browser image context menu.
+
+Image generation is intentionally available only from the local filesystem
+backend. Hosted read-only Viewer deployments do not expose the proxy route.
 
 ## Reference Docs
 

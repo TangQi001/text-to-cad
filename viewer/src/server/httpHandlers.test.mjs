@@ -482,6 +482,78 @@ test("CAD Viewer API middleware rejects hosted reveal requests", async () => {
   assert.match(JSON.parse(res.body).error, /local filesystem/);
 });
 
+test("CAD Viewer API middleware generates images only through a local backend", async () => {
+  const originalFetch = globalThis.fetch;
+  const providerCalls = [];
+  globalThis.fetch = async (url, options) => {
+    providerCalls.push({ url: String(url), options });
+    return new Response(JSON.stringify({
+      data: [{ b64_json: Buffer.from("generated").toString("base64") }]
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+
+  try {
+    const middleware = createCadViewerApiMiddleware({
+      backend: { kind: "local-fs" },
+    });
+    const req = createJsonRequest({
+      url: "/__cad/image-generation",
+      body: {
+        baseUrl: "https://api.example.test/v1",
+        apiKey: "test-key",
+        model: "image-model",
+        prompt: "refine this CAD view",
+        imageBase64: Buffer.from("view").toString("base64"),
+        imageMimeType: "image/png",
+      },
+    });
+    const res = createResponse();
+
+    await middleware(req, res, () => {});
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(providerCalls.length, 1);
+    assert.equal(providerCalls[0].url, "https://api.example.test/v1/images/edits");
+    assert.deepEqual(JSON.parse(res.body), {
+      ok: true,
+      imageBase64: Buffer.from("generated").toString("base64"),
+      mimeType: "image/png",
+      revisedPrompt: "",
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("CAD Viewer API middleware rejects image generation for hosted backends", async () => {
+  const middleware = createCadViewerApiMiddleware({
+    backend: { kind: "vercel-blob" },
+  });
+  const req = createJsonRequest({ url: "/__cad/image-generation" });
+  const res = createResponse();
+
+  await middleware(req, res, () => {});
+
+  assert.equal(res.statusCode, 405);
+  assert.match(JSON.parse(res.body).error, /local CAD Viewer/);
+});
+
+test("CAD Viewer API middleware requires POST for image generation", async () => {
+  const middleware = createCadViewerApiMiddleware({
+    backend: { kind: "local-fs" },
+  });
+  const req = { method: "GET", url: "/__cad/image-generation" };
+  const res = createResponse();
+
+  await middleware(req, res, () => {});
+
+  assert.equal(res.statusCode, 405);
+  assert.equal(res.getHeader("allow"), "POST");
+});
+
 test("CAD Viewer API middleware exports implicit CAD files through local backend", async () => {
   const calls = [];
   const catalog = {

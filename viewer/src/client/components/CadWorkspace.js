@@ -30,6 +30,7 @@ import { useCadWorkspaceSelection } from "./workbench/hooks/useCadWorkspaceSelec
 import { useCadDirectorySession } from "./workbench/hooks/useCadDirectorySession";
 import { useCadWorkspaceSelectors } from "./workbench/hooks/useCadWorkspaceSelectors";
 import { useCadWorkspaceShortcuts } from "./workbench/hooks/useCadWorkspaceShortcuts";
+import { ImageGenerationProvider } from "@/workbench/imageGenerationContext";
 import {
   applyColorSchemeToDocument,
   DARK_COLOR_SCHEME_ID,
@@ -8400,6 +8401,18 @@ export default function CadWorkspace({
     setTabToolMode
   });
 
+  const captureCurrentViewBlob = useCallback(async () => {
+    if (!selectedEntry || !viewerRef.current?.captureScreenshot) {
+      throw new Error("CAD Viewer not ready");
+    }
+    return await viewerRef.current.captureScreenshot({ mode: "blob" });
+  }, [selectedEntry]);
+
+  const imageGenerationContextValue = useMemo(() => ({
+    available: viewerServerBackend === "local-fs" && Boolean(selectedEntry),
+    captureCurrentViewBlob
+  }), [captureCurrentViewBlob, selectedEntry, viewerServerBackend]);
+
   const handleScreenshotCopy = useCallback(async () => {
     if (!selectedEntry) {
       return;
@@ -8565,15 +8578,16 @@ export default function CadWorkspace({
   );
 
   return (
-    <SidebarProvider
-      open={effectiveSidebarOpen}
-      onOpenChange={handleSidebarOpenChange}
-      mobileOpen={effectiveSidebarOpen}
-      onMobileOpenChange={handleSidebarOpenChange}
-      data-glass-tone={cadWorkspaceGlassTone}
-      style={{ "--sidebar-width": `${sidebarShellWidth}px` }}
-      className="relative h-svh overflow-hidden bg-transparent"
-    >
+    <ImageGenerationProvider value={imageGenerationContextValue}>
+      <SidebarProvider
+        open={effectiveSidebarOpen}
+        onOpenChange={handleSidebarOpenChange}
+        mobileOpen={effectiveSidebarOpen}
+        onMobileOpenChange={handleSidebarOpenChange}
+        data-glass-tone={cadWorkspaceGlassTone}
+        style={{ "--sidebar-width": `${sidebarShellWidth}px` }}
+        className="relative h-svh overflow-hidden bg-transparent"
+      >
       <div className="fixed inset-0 z-0">
         <CadRenderPane
           viewerRef={viewerRef}
@@ -9103,7 +9117,8 @@ export default function CadWorkspace({
           previewMode={previewMode}
           setViewerAlertOpen={setViewerAlertOpen}
         />
-      </SidebarInset>
-    </SidebarProvider>
+        </SidebarInset>
+      </SidebarProvider>
+    </ImageGenerationProvider>
   );
 }

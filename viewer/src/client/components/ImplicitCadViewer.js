@@ -802,6 +802,9 @@ const ImplicitCadViewer = forwardRef(function ImplicitCadViewer({
         return await copyImageBlobToClipboard(blobPromise);
       }
       const blob = await blobPromise;
+      if (mode === "blob") {
+        return blob;
+      }
       return triggerBlobDownload(blob, { filename });
     },
     getPerspective() {

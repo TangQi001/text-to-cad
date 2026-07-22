@@ -4,6 +4,7 @@ import { cn } from "@/ui/utils";
 import { copyTextToClipboard } from "@/ui/clipboard";
 import { FILE_SHEET_SECTION_IDS } from "@/workbench/fileSheetSections";
 import { fileMetadataGroupsForEntry } from "@/workbench/fileMetadata";
+import ImageGenerationTool from "./ImageGenerationTool";
 import {
   FILE_SHEET_FIELD_LABEL_CLASSES,
   FileSheetSection,
@@ -152,6 +153,7 @@ export default function FileMetadataSection({
       aria-label="File metadata"
     >
       <div>
+        <ImageGenerationTool />
         {groups.map((group) => (
           <FileSheetSubsection key={group.title} title={group.title} contentClassName="px-3">
             <dl className="space-y-1.5">

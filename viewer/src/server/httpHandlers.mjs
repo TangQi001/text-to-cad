@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { ImageGenerationError, generateImageFromReference } from "./imageGeneration.mjs";
+
 const STATIC_CONTENT_TYPES = new Map([
   [".css", "text/css; charset=utf-8"],
   [".html", "text/html; charset=utf-8"],
@@ -430,6 +432,32 @@ export function createCadViewerApiMiddleware({
         });
       } catch (error) {
         sendJson(res, 400, {
+          ok: false,
+          error: errorMessage(error),
+        });
+      }
+      return;
+    }
+    if (requestUrl.pathname === "/__cad/image-generation") {
+      const method = String(req.method || "GET").toUpperCase();
+      if (method !== "POST") {
+        res.setHeader("allow", "POST");
+        sendJson(res, 405, { error: "Use POST to generate an image" });
+        return;
+      }
+      if (backend.kind !== "local-fs") {
+        sendJson(res, 405, { error: "Image generation is only available in the local CAD Viewer" });
+        return;
+      }
+      try {
+        const body = await readJsonBody(req, { limitBytes: 18 * 1024 * 1024 });
+        const result = await generateImageFromReference(body);
+        sendJson(res, 200, { ok: true, ...result });
+      } catch (error) {
+        const statusCode = error instanceof ImageGenerationError
+          ? error.statusCode
+          : 500;
+        sendJson(res, statusCode, {
           ok: false,
           error: errorMessage(error),
         });

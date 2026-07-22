@@ -30,6 +30,8 @@ Current intended use:
 
 - `cad-viewer:theme`: global saved-theme library, active theme id, and saved
   appearance settings.
+- `cad-viewer:image-generation-settings`: image generation Base URL and model.
+  Never store the API key in this durable tier.
 
 Avoid adding file-specific state to `localStorage`. If the value depends on the
 selected file, the active root directory, a generated asset hash, or a tab
@@ -47,7 +49,12 @@ Current keys:
 ```text
 cad-viewer:directory-session:v1
 cad-viewer:active-dir:v1
+cad-viewer:image-generation-api-key
 ```
+
+`cad-viewer:image-generation-api-key` stores the optional image-provider key for
+only the current browser tab. It is independent of the active directory and is
+sent only after the user presses **Generate image**.
 
 Current `cad-viewer:directory-session:v1` fields:
 

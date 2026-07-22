@@ -590,6 +590,9 @@ const DxfViewer = forwardRef(function DxfViewer({
       }
 
       const blob = await blobPromise;
+      if (mode === "blob") {
+        return blob;
+      }
       return triggerBlobDownload(blob, { filename });
     }
   }), [palette.background]);
