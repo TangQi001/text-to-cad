@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 import {
   Check,
   ChevronRight,
@@ -7,6 +7,7 @@ import {
   EyeOff,
   ImagePlus,
   LoaderCircle,
+  RotateCw,
   Settings2
 } from "lucide-react";
 import { Button } from "../ui/button";
@@ -23,13 +24,28 @@ import { copyImageBlobToClipboard } from "@/ui/clipboard";
 import { cn } from "@/ui/utils";
 import { useImageGenerationContext } from "@/workbench/imageGenerationContext";
 import {
-  base64ImageToBlob,
-  blobToBase64,
   imageGenerationValidationError,
   readImageGenerationSettings,
   writeImageGenerationSettings
 } from "@/workbench/imageGenerationSettings";
 import { FILE_SHEET_FIELD_LABEL_CLASSES } from "./FileSheet";
+
+const ACTIVE_STATUSES = new Set([
+  "submitting",
+  "queued",
+  "requesting",
+  "reading_response",
+  "downloading_result"
+]);
+
+const STATUS_LABELS = Object.freeze({
+  submitting: "Preparing request...",
+  queued: "Queued locally...",
+  requesting: "Waiting for image provider...",
+  reading_response: "Reading generated image...",
+  downloading_result: "Saving generated image...",
+  interrupted: "Viewer restarted before this task finished.",
+});
 
 function DisclosureButton({ open, icon: Icon, children, onClick }) {
   return (
@@ -63,28 +79,30 @@ function Field({ label, children }) {
   );
 }
 
+function statusMessage(state) {
+  if (state?.error?.message) {
+    return state.error.message;
+  }
+  return STATUS_LABELS[state?.status] || STATUS_LABELS[state?.stage] || "";
+}
+
 export default function ImageGenerationTool() {
   const imageGeneration = useImageGenerationContext();
-  const [open, setOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const state = imageGeneration?.state || {};
   const [showApiKey, setShowApiKey] = useState(false);
   const [settings, setSettings] = useState(() => readImageGenerationSettings());
-  const [prompt, setPrompt] = useState("");
-  const [generating, setGenerating] = useState(false);
-  const [error, setError] = useState("");
-  const [result, setResult] = useState(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const active = ACTIVE_STATUSES.has(state.status);
+  const resultUrl = String(state.resultUrl || "").trim();
+  const canGenerate = imageGeneration?.available && !active;
 
-  const resultUrl = useMemo(() => (
-    result?.blob ? URL.createObjectURL(result.blob) : ""
-  ), [result]);
-
-  useEffect(() => () => {
-    if (resultUrl) {
-      URL.revokeObjectURL(resultUrl);
+  const updateState = (nextValue) => {
+    if (!imageGeneration?.fileRef || typeof imageGeneration.updateState !== "function") {
+      return;
     }
-  }, [resultUrl]);
+    imageGeneration.updateState(imageGeneration.fileRef, nextValue);
+  };
 
   const updateSetting = (key, value) => {
     setSettings((current) => {
@@ -95,74 +113,120 @@ export default function ImageGenerationTool() {
   };
 
   const handleGenerate = async () => {
+    const prompt = String(state.prompt || "");
     const validationError = imageGenerationValidationError({ ...settings, prompt });
     if (validationError) {
-      setError(validationError);
+      updateState((current) => ({
+        ...current,
+        status: "failed",
+        stage: "validation",
+        error: {
+          code: "validation_failed",
+          stage: "validation",
+          message: validationError,
+          retryable: false,
+          providerStatus: 0,
+        }
+      }));
       return;
     }
     if (!imageGeneration?.available || typeof imageGeneration.captureCurrentViewBlob !== "function") {
-      setError("Image generation requires a local CAD Viewer with a rendered view.");
+      updateState((current) => ({
+        ...current,
+        status: "failed",
+        stage: "capturing_view",
+        error: {
+          code: "viewer_unavailable",
+          stage: "capturing_view",
+          message: "Image generation requires a local CAD Viewer with a rendered view.",
+          retryable: true,
+          providerStatus: 0,
+        }
+      }));
       return;
     }
 
-    setGenerating(true);
-    setError("");
+    updateState((current) => ({
+      ...current,
+      status: "submitting",
+      stage: "capturing_view",
+      error: null,
+      revisedPrompt: "",
+      resultUrl: "",
+    }));
     setCopied(false);
     try {
       const viewBlob = await imageGeneration.captureCurrentViewBlob();
-      const response = await fetch("/__cad/image-generation", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          baseUrl: settings.baseUrl,
-          apiKey: settings.apiKey,
-          model: settings.model,
-          prompt: prompt.trim(),
-          imageBase64: await blobToBase64(viewBlob),
-          imageMimeType: viewBlob.type || "image/png"
-        })
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok || !payload?.ok || !payload?.imageBase64) {
-        throw new Error(payload?.error || `Image generation failed (${response.status})`);
-      }
-      setResult({
-        blob: base64ImageToBlob(payload.imageBase64, payload.mimeType),
-        revisedPrompt: String(payload.revisedPrompt || "").trim()
+      await imageGeneration.createJob({
+        fileRef: imageGeneration.fileRef,
+        settings,
+        prompt,
+        imageBlob: viewBlob,
       });
     } catch (generationError) {
-      setError(generationError instanceof Error ? generationError.message : "Image generation failed.");
-    } finally {
-      setGenerating(false);
+      updateState((current) => ({
+        ...current,
+        status: "failed",
+        stage: "submission",
+        error: {
+          code: generationError?.details?.code || "job_submission_failed",
+          stage: generationError?.details?.stage || "submission",
+          message: generationError instanceof Error ? generationError.message : "Image generation request failed.",
+          retryable: generationError?.details?.retryable !== false,
+          providerStatus: Number(generationError?.details?.providerStatus) || 0,
+        }
+      }));
     }
   };
 
   const handleCopy = async () => {
-    if (!result?.blob) {
+    if (!resultUrl) {
       return;
     }
     try {
-      await copyImageBlobToClipboard(result.blob, { type: result.blob.type || "image/png" });
+      const response = await fetch(resultUrl);
+      if (!response.ok) {
+        throw new Error(`Generated image download failed (${response.status})`);
+      }
+      const blob = await response.blob();
+      await copyImageBlobToClipboard(blob, { type: blob.type || "image/png" });
       setCopied(true);
       window.setTimeout?.(() => setCopied(false), 1200);
     } catch (copyError) {
-      setError(copyError instanceof Error ? copyError.message : "Image copy failed.");
+      updateState((current) => ({
+        ...current,
+        error: {
+          code: "result_copy_failed",
+          stage: "copying_result",
+          message: copyError instanceof Error ? copyError.message : "Image copy failed.",
+          retryable: true,
+          providerStatus: 0,
+        }
+      }));
     }
   };
 
   return (
     <div className="mx-3 my-2 overflow-hidden rounded-md border border-sidebar-border/80 bg-sidebar-accent/15">
-      <DisclosureButton open={open} icon={ImagePlus} onClick={() => setOpen((value) => !value)}>
+      <DisclosureButton
+        open={state.toolOpen === true}
+        icon={ImagePlus}
+        onClick={() => updateState((current) => ({ ...current, toolOpen: !current.toolOpen }))}
+      >
         Generate image
       </DisclosureButton>
 
-      {open ? (
+      {state.toolOpen ? (
         <div className="space-y-3 border-t border-sidebar-border/70 p-2.5">
           <div className="overflow-hidden rounded-sm border border-sidebar-border/70">
-            <DisclosureButton open={settingsOpen} icon={Settings2} onClick={() => setSettingsOpen((value) => !value)}>
+            <DisclosureButton
+              open={state.settingsOpen === true}
+              icon={Settings2}
+              onClick={() => updateState((current) => ({ ...current, settingsOpen: !current.settingsOpen }))}
+            >
               Settings
             </DisclosureButton>
-            {settingsOpen ? (
+            {state.settingsOpen ? (
               <div className="space-y-2.5 border-t border-sidebar-border/60 p-2.5">
                 <Field label="Base URL">
                   <Input
@@ -206,7 +270,7 @@ export default function ImageGenerationTool() {
                   />
                 </Field>
                 <p className="text-[10px] leading-4 text-muted-foreground">
-                  The API key stays in this browser tab. It is sent only when you generate an image.
+                  The API key stays in this browser tab. It is sent only when you create an image task.
                 </p>
               </div>
             ) : null}
@@ -215,10 +279,15 @@ export default function ImageGenerationTool() {
           <Field label="Prompt">
             <Textarea
               aria-label="Prompt"
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
+              value={state.prompt || ""}
+              onChange={(event) => updateState((current) => ({
+                ...current,
+                prompt: event.target.value,
+                error: current.status === "failed" ? null : current.error,
+              }))}
               placeholder="Describe the refined image while preserving this camera angle..."
               className="min-h-24 resize-y px-2 py-2 !text-[11px] leading-4"
+              disabled={active}
             />
           </Field>
 
@@ -226,11 +295,11 @@ export default function ImageGenerationTool() {
             type="button"
             size="sm"
             className="h-8 w-full text-[11px]"
-            disabled={generating || !imageGeneration?.available}
+            disabled={!canGenerate}
             onClick={() => void handleGenerate()}
           >
-            {generating ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" /> : <ImagePlus className="size-3.5" aria-hidden="true" />}
-            {generating ? "Generating..." : "Generate image"}
+            {active ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" /> : <ImagePlus className="size-3.5" aria-hidden="true" />}
+            {active ? (statusMessage(state) || "Generating...") : "Generate image"}
           </Button>
 
           {!imageGeneration?.available ? (
@@ -238,7 +307,17 @@ export default function ImageGenerationTool() {
               Start the local CAD Viewer and open a rendered file to use image generation.
             </p>
           ) : null}
-          {error ? <p role="alert" className="text-[10px] leading-4 text-destructive">{error}</p> : null}
+          {state.status === "failed" || state.status === "interrupted" ? (
+            <div className="space-y-1.5">
+              <p role="alert" className="text-[10px] leading-4 text-destructive">{statusMessage(state)}</p>
+              {state.error?.retryable !== false ? (
+                <Button type="button" size="xs" variant="outline" className="h-7 text-[10px]" onClick={() => void handleGenerate()}>
+                  <RotateCw className="size-3" />
+                  Retry image generation
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
 
           {resultUrl ? (
             <div className="space-y-1.5">
@@ -254,8 +333,8 @@ export default function ImageGenerationTool() {
                   Open image
                 </span>
               </button>
-              {result.revisedPrompt ? (
-                <p className="line-clamp-3 text-[10px] leading-4 text-muted-foreground">{result.revisedPrompt}</p>
+              {state.revisedPrompt ? (
+                <p className="line-clamp-3 text-[10px] leading-4 text-muted-foreground">{state.revisedPrompt}</p>
               ) : null}
             </div>
           ) : null}
@@ -274,7 +353,7 @@ export default function ImageGenerationTool() {
             </div>
           ) : null}
           <div className="flex justify-end">
-            <Button type="button" variant="outline" size="sm" onClick={() => void handleCopy()} disabled={!result?.blob}>
+            <Button type="button" variant="outline" size="sm" onClick={() => void handleCopy()} disabled={!resultUrl}>
               {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
               {copied ? "Copied" : "Copy image"}
             </Button>

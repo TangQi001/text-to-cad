@@ -30,7 +30,7 @@ import { useCadWorkspaceSelection } from "./workbench/hooks/useCadWorkspaceSelec
 import { useCadDirectorySession } from "./workbench/hooks/useCadDirectorySession";
 import { useCadWorkspaceSelectors } from "./workbench/hooks/useCadWorkspaceSelectors";
 import { useCadWorkspaceShortcuts } from "./workbench/hooks/useCadWorkspaceShortcuts";
-import { ImageGenerationProvider } from "@/workbench/imageGenerationContext";
+import { ImageGenerationProvider, normalizeImageGenerationState } from "@/workbench/imageGenerationContext";
 import {
   applyColorSchemeToDocument,
   DARK_COLOR_SCHEME_ID,
@@ -333,6 +333,14 @@ const CAD_WORKSPACE_TOP_BAR_HEIGHT = 44;
 const IMPLICIT_PARAMETER_RENDER_THROTTLE_MS = 36;
 const IMPLICIT_PARAMETER_ANIMATION_TICK_MS = 80;
 const IMPLICIT_DYNAMIC_RENDER_SETTLE_MS = 220;
+const IMAGE_GENERATION_POLL_INTERVAL_MS = 1_000;
+
+function createImageGenerationRequestId() {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  return `image-${Date.now()}-${Math.random().toString(36).slice(2, 14)}`;
+}
 const DEFAULT_LARGE_FILE_STATE = Object.freeze({
   selectableTopologyEnabled: false
 });
@@ -1282,6 +1290,8 @@ export default function CadWorkspace({
   const [jointValuesByFileRef, setJointValuesByFileRef] = useState({});
   const [selectedUrdfGroupStateIdByFileRef, setSelectedUrdfGroupStateIdByFileRef] = useState({});
   const [urdfMotionStateByFileRef, setUrdfMotionStateByFileRef] = useState({});
+  const [imageGenerationStateByFileRef, setImageGenerationStateByFileRef] = useState({});
+  const imageGenerationStateByFileRefRef = useRef({});
   const [stepModuleLoadState, setStepModuleLoadState] = useState({
     url: "",
     status: "idle",
@@ -3961,7 +3971,10 @@ export default function CadWorkspace({
         },
         largeFile: {
           selectableTopologyEnabled: largeFileState.selectableTopologyEnabled
-        }
+        },
+        imageGeneration: normalizeImageGenerationState(
+          targetFileKey ? imageGenerationStateByFileRefRef.current?.[targetFileKey] : null
+        )
       }
     });
   }, [
@@ -3971,6 +3984,7 @@ export default function CadWorkspace({
     dxfThicknessMm,
     implicitAnimationState,
     implicitParameterValues,
+    imageGenerationStateByFileRef,
     jointValuesByFileRef,
     largeFileState,
     selectedEntry,
@@ -3989,15 +4003,19 @@ export default function CadWorkspace({
     fileSessionSaveTimerRef.current = 0;
   }, []);
 
-  const writeFileSessionForEntry = useCallback((entry) => {
+  const writeFileSessionForEntry = useCallback((entry, imageGenerationState = undefined) => {
     const targetFileKey = fileKey(entry);
     if (!targetFileKey) {
       return true;
     }
+    const snapshot = buildActiveFileSessionSnapshot(entry);
+    if (imageGenerationState !== undefined) {
+      snapshot.slices.imageGeneration = normalizeImageGenerationState(imageGenerationState);
+    }
     return writeFileSessionState(
       fileSessionNamespace,
       targetFileKey,
-      buildActiveFileSessionSnapshot(entry),
+      snapshot,
       { onWriteError: handlePersistenceWriteError }
     );
   }, [
@@ -4073,6 +4091,18 @@ export default function CadWorkspace({
     }
 
     const urdfSlice = sessionState?.slices?.urdf || null;
+    const imageGenerationSlice = normalizeImageGenerationState(sessionState?.slices?.imageGeneration);
+    setImageGenerationStateByFileRef((current) => {
+      if (Object.prototype.hasOwnProperty.call(imageGenerationStateByFileRefRef.current, normalizedKey)) {
+        return imageGenerationStateByFileRefRef.current;
+      }
+      const next = {
+        ...current,
+        [normalizedKey]: imageGenerationSlice
+      };
+      imageGenerationStateByFileRefRef.current = next;
+      return next;
+    });
     if (urdfSlice) {
       setJointValuesByFileRef((current) => ({
         ...current,
@@ -4197,6 +4227,8 @@ export default function CadWorkspace({
     setDrawingStrokes([]);
     setDrawingUndoStack([]);
     setDrawingRedoStack([]);
+    setImageGenerationStateByFileRef({});
+    imageGenerationStateByFileRefRef.current = {};
     setSelectedKey("");
   }, [setTabToolsOpen]);
 
@@ -4370,6 +4402,7 @@ export default function CadWorkspace({
     };
   }, [
     clearFileSessionSaveTimer,
+    imageGenerationStateByFileRef,
     implicitAnimationState.playing,
     scheduleActiveFileSessionSave,
     stepModuleAnimationState.playing
@@ -8408,10 +8441,191 @@ export default function CadWorkspace({
     return await viewerRef.current.captureScreenshot({ mode: "blob" });
   }, [selectedEntry]);
 
+  const selectedImageGenerationState = useMemo(() => normalizeImageGenerationState(
+    selectedEntry ? imageGenerationStateByFileRef?.[fileKey(selectedEntry)] : null
+  ), [imageGenerationStateByFileRef, selectedEntry]);
+
+  const updateImageGenerationState = useCallback((fileRef, nextValue) => {
+    const normalizedFileRef = String(fileRef || "").trim();
+    if (!normalizedFileRef) {
+      return;
+    }
+    const currentState = normalizeImageGenerationState(
+      imageGenerationStateByFileRefRef.current?.[normalizedFileRef]
+    );
+    const resolvedValue = typeof nextValue === "function"
+      ? nextValue(currentState)
+      : nextValue;
+    const nextState = normalizeImageGenerationState(resolvedValue);
+    const next = {
+      ...imageGenerationStateByFileRefRef.current,
+      [normalizedFileRef]: nextState
+    };
+    imageGenerationStateByFileRefRef.current = next;
+    setImageGenerationStateByFileRef(next);
+    const entry = entryMap.get(normalizedFileRef);
+    if (entry) {
+      writeFileSessionForEntry(entry, nextState);
+    }
+  }, [entryMap, writeFileSessionForEntry]);
+
+  const refreshImageGenerationJob = useCallback(async (fileRef, jobId, clientRequestId = "") => {
+    const normalizedFileRef = String(fileRef || "").trim();
+    const normalizedJobId = String(jobId || "").trim();
+    const normalizedClientRequestId = String(clientRequestId || "").trim();
+    if (!normalizedFileRef || !normalizedJobId) {
+      return null;
+    }
+    const response = await fetch(`/__cad/image-generation/${encodeURIComponent(normalizedJobId)}`);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload?.ok || !payload?.job) {
+      const error = new Error(payload?.error || `Image generation task lookup failed (${response.status})`);
+      error.jobMissing = response.status === 404;
+      throw error;
+    }
+    updateImageGenerationState(normalizedFileRef, (current) => {
+      if (
+        (normalizedClientRequestId && current.clientRequestId !== normalizedClientRequestId)
+        || current.jobId !== normalizedJobId
+      ) {
+        return current;
+      }
+      return {
+        ...current,
+        ...payload.job,
+        jobId: normalizedJobId,
+        resultUrl: String(payload.resultUrl || ""),
+        error: payload.job.error || null,
+      };
+    });
+    return payload.job;
+  }, [updateImageGenerationState]);
+
+  const createImageGenerationJob = useCallback(async ({ fileRef, settings, prompt, imageBlob }) => {
+    const normalizedFileRef = String(fileRef || "").trim();
+    if (!normalizedFileRef || !imageBlob) {
+      throw new Error("Current CAD view is unavailable");
+    }
+    const clientRequestId = createImageGenerationRequestId();
+    updateImageGenerationState(normalizedFileRef, (current) => ({
+      ...current,
+      prompt: String(prompt || ""),
+      clientRequestId,
+      jobId: "",
+      status: "submitting",
+      stage: "capturing_view",
+      revisedPrompt: "",
+      resultUrl: "",
+      error: null,
+    }));
+    const imageBytes = new Uint8Array(await imageBlob.arrayBuffer());
+    let binary = "";
+    const chunkSize = 0x8000;
+    for (let offset = 0; offset < imageBytes.length; offset += chunkSize) {
+      binary += String.fromCharCode(...imageBytes.subarray(offset, offset + chunkSize));
+    }
+    const response = await fetch("/__cad/image-generation", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        clientRequestId,
+        fileKey: normalizedFileRef,
+        baseUrl: settings.baseUrl,
+        apiKey: settings.apiKey,
+        model: settings.model,
+        prompt: String(prompt || "").trim(),
+        imageBase64: btoa(binary),
+        imageMimeType: imageBlob.type || "image/png",
+      })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload?.ok || !payload?.job) {
+      const error = new Error(payload?.error || `Image generation task creation failed (${response.status})`);
+      error.details = payload?.details || null;
+      throw error;
+    }
+    updateImageGenerationState(normalizedFileRef, (current) => {
+      if (current.clientRequestId !== clientRequestId) {
+        return current;
+      }
+      return {
+        ...current,
+        ...payload.job,
+        jobId: String(payload.job.id || "").trim(),
+        resultUrl: "",
+        error: null,
+      };
+    });
+    return payload.job;
+  }, [updateImageGenerationState]);
+
+  const activeImageGenerationJobKey = useMemo(() => Object.entries(imageGenerationStateByFileRef || {})
+    .filter(([, state]) => ["submitting", "queued", "requesting", "reading_response", "downloading_result"].includes(state?.status) && state?.jobId)
+    .map(([fileRef, state]) => `${fileRef}\u0000${state.jobId}`)
+    .sort()
+    .join("\u0001"), [imageGenerationStateByFileRef]);
+
+  useEffect(() => {
+    if (!activeImageGenerationJobKey) {
+      return undefined;
+    }
+    let cancelled = false;
+    const refresh = async () => {
+      const activeJobs = Object.entries(imageGenerationStateByFileRefRef.current || {})
+        .filter(([, state]) => ["submitting", "queued", "requesting", "reading_response", "downloading_result"].includes(state?.status) && state?.jobId)
+        .map(([fileRef, state]) => ({
+          fileRef,
+          jobId: state.jobId,
+          clientRequestId: state.clientRequestId,
+        }));
+      await Promise.all(activeJobs.map(async ({ fileRef, jobId, clientRequestId }) => {
+        try {
+          if (!cancelled) {
+            await refreshImageGenerationJob(fileRef, jobId, clientRequestId);
+          }
+        } catch (error) {
+          if (!cancelled) {
+            updateImageGenerationState(fileRef, (current) => ({
+              ...current,
+              status: error?.jobMissing ? "failed" : current.status,
+              stage: error?.jobMissing ? "status_lookup" : current.stage,
+              error: {
+                code: error?.jobMissing ? "job_missing" : "job_status_unavailable",
+                stage: "status_lookup",
+                message: error instanceof Error ? error.message : "Image generation task lookup failed",
+                retryable: true,
+                providerStatus: 0,
+              }
+            }));
+          }
+        }
+      }));
+    };
+    void refresh();
+    const intervalId = window.setInterval(() => void refresh(), IMAGE_GENERATION_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [activeImageGenerationJobKey, refreshImageGenerationJob, updateImageGenerationState]);
+
   const imageGenerationContextValue = useMemo(() => ({
     available: viewerServerBackend === "local-fs" && Boolean(selectedEntry),
-    captureCurrentViewBlob
-  }), [captureCurrentViewBlob, selectedEntry, viewerServerBackend]);
+    fileRef: selectedEntry ? fileKey(selectedEntry) : "",
+    state: selectedImageGenerationState,
+    captureCurrentViewBlob,
+    createJob: createImageGenerationJob,
+    updateState: updateImageGenerationState,
+    refreshJob: refreshImageGenerationJob,
+  }), [
+    captureCurrentViewBlob,
+    createImageGenerationJob,
+    refreshImageGenerationJob,
+    selectedEntry,
+    selectedImageGenerationState,
+    updateImageGenerationState,
+    viewerServerBackend
+  ]);
 
   const handleScreenshotCopy = useCallback(async () => {
     if (!selectedEntry) {

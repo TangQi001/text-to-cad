@@ -388,3 +388,61 @@ test("file session state restores urdf slices only when robot assets match", () 
   });
   assert.equal(readFileSessionState("models", oldEntry.file, staleEntry, { storage }).slices.urdf, undefined);
 });
+
+test("file session state persists image task metadata without secrets", () => {
+  const storage = createMemoryStorage();
+  const entry = stepEntry("parts/generated.step");
+
+  writeFileSessionState("models", entry.file, createFileSessionSnapshot({
+    entry,
+    slices: {
+      imageGeneration: {
+        prompt: "render this view",
+        clientRequestId: "request-12345678",
+        jobId: "job-12345678",
+        resultUrl: "/__cad/image-generation/job-12345678/result",
+        status: "completed",
+        stage: "completed",
+        revisedPrompt: "refined prompt",
+        toolOpen: true,
+        settingsOpen: true,
+        apiKey: "must-not-be-persisted"
+      }
+    }
+  }), { storage });
+
+  const restored = readFileSessionState("models", entry.file, entry, { storage }).slices.imageGeneration;
+  assert.deepEqual(restored, {
+    prompt: "render this view",
+    clientRequestId: "request-12345678",
+    jobId: "job-12345678",
+    resultUrl: "/__cad/image-generation/job-12345678/result",
+    status: "completed",
+    stage: "completed",
+    revisedPrompt: "refined prompt",
+    error: null,
+    toolOpen: true,
+    settingsOpen: true
+  });
+  assert.doesNotMatch(JSON.stringify(restored), /must-not-be-persisted/);
+});
+
+test("file session state makes interrupted task submission retryable after reload", () => {
+  const entry = stepEntry("parts/reloaded.step");
+  const snapshot = createFileSessionSnapshot({
+    entry,
+    slices: {
+      imageGeneration: {
+        prompt: "keep this prompt",
+        clientRequestId: "request-reload-1234",
+        status: "submitting",
+        stage: "capturing_view"
+      }
+    }
+  });
+
+  assert.equal(snapshot.slices.imageGeneration.prompt, "keep this prompt");
+  assert.equal(snapshot.slices.imageGeneration.status, "interrupted");
+  assert.equal(snapshot.slices.imageGeneration.error.code, "job_submission_interrupted");
+  assert.equal(snapshot.slices.imageGeneration.error.retryable, true);
+});

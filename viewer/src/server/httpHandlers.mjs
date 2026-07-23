@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { ImageGenerationError, generateImageFromReference } from "./imageGeneration.mjs";
+import { ImageGenerationError, imageGenerationErrorPayload } from "./imageGeneration.mjs";
+import { createImageGenerationJobStore } from "./imageGenerationJobs.mjs";
 
 const STATIC_CONTENT_TYPES = new Map([
   [".css", "text/css; charset=utf-8"],
@@ -204,10 +205,14 @@ export function createCadViewerApiMiddleware({
   onDirectoryActivated = () => {},
   rootDir,
   catalogCacheControl = "",
+  imageGenerationJobs = null,
 } = {}) {
   if (!backend) {
     throw new Error("createCadViewerApiMiddleware requires backend");
   }
+  const resolvedImageGenerationJobs = imageGenerationJobs || (
+    backend.kind === "local-fs" ? createImageGenerationJobStore() : null
+  );
   return async function cadViewerApiMiddleware(req, res, next) {
     const requestUrl = new URL(req.url || "/", "http://localhost");
     const activeRootDir = requestRootDir(requestUrl) || rootDir || "";
@@ -438,30 +443,80 @@ export function createCadViewerApiMiddleware({
       }
       return;
     }
-    if (requestUrl.pathname === "/__cad/image-generation") {
-      const method = String(req.method || "GET").toUpperCase();
-      if (method !== "POST") {
-        res.setHeader("allow", "POST");
-        sendJson(res, 405, { error: "Use POST to generate an image" });
-        return;
-      }
-      if (backend.kind !== "local-fs") {
+    if (requestUrl.pathname.startsWith("/__cad/image-generation")) {
+      if (backend.kind !== "local-fs" || !resolvedImageGenerationJobs) {
         sendJson(res, 405, { error: "Image generation is only available in the local CAD Viewer" });
         return;
       }
-      try {
-        const body = await readJsonBody(req, { limitBytes: 18 * 1024 * 1024 });
-        const result = await generateImageFromReference(body);
-        sendJson(res, 200, { ok: true, ...result });
-      } catch (error) {
-        const statusCode = error instanceof ImageGenerationError
-          ? error.statusCode
-          : 500;
-        sendJson(res, statusCode, {
-          ok: false,
-          error: errorMessage(error),
-        });
+      const method = String(req.method || "GET").toUpperCase();
+      const pathParts = requestUrl.pathname.split("/").filter(Boolean);
+      const jobId = pathParts.length >= 3 ? pathParts[2] : "";
+      const isResultRequest = pathParts.length === 4 && pathParts[3] === "result";
+      if (pathParts.length > 4 || (pathParts.length === 4 && !isResultRequest)) {
+        sendJson(res, 404, { error: "Image generation task not found" });
+        return;
       }
+      if (!jobId) {
+        if (method !== "POST") {
+          res.setHeader("allow", "POST");
+          sendJson(res, 405, { error: "Use POST to create an image generation task" });
+          return;
+        }
+        try {
+          const body = await readJsonBody(req, { limitBytes: 18 * 1024 * 1024 });
+          const created = resolvedImageGenerationJobs.create({
+            ...body,
+            fileKey: activeFileRef || body.fileKey,
+          });
+          sendJson(res, created.created ? 202 : 200, {
+            ok: true,
+            job: created.job,
+          });
+        } catch (error) {
+          const details = imageGenerationErrorPayload(error);
+          sendJson(res, error instanceof ImageGenerationError ? error.statusCode : 500, {
+            ok: false,
+            error: details.message,
+            details,
+          });
+        }
+        return;
+      }
+      if (isResultRequest) {
+        if (method !== "GET") {
+          res.setHeader("allow", "GET");
+          sendJson(res, 405, { error: "Use GET to read an image generation result" });
+          return;
+        }
+        const result = resolvedImageGenerationJobs.readResult(jobId);
+        if (!result) {
+          sendJson(res, 404, { error: "Generated image is not available" });
+          return;
+        }
+        res.statusCode = 200;
+        res.setHeader("content-type", result.mimeType || "image/png");
+        res.setHeader("cache-control", "no-store");
+        res.setHeader("content-length", String(result.body.length));
+        res.end(result.body);
+        return;
+      }
+      if (method !== "GET") {
+        res.setHeader("allow", "GET");
+        sendJson(res, 405, { error: "Use GET to read an image generation task" });
+        return;
+      }
+      const job = resolvedImageGenerationJobs.get(jobId);
+      if (!job) {
+        sendJson(res, 404, { error: "Image generation task not found" });
+        return;
+      }
+      sendJson(res, 200, {
+        ok: true,
+        job,
+        resultUrl: job.status === "completed" && job.result
+          ? `/__cad/image-generation/${encodeURIComponent(job.id)}/result`
+          : "",
+      });
       return;
     }
     if (requestUrl.pathname === "/__cad/implicit-export") {

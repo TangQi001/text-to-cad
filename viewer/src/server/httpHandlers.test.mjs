@@ -482,50 +482,87 @@ test("CAD Viewer API middleware rejects hosted reveal requests", async () => {
   assert.match(JSON.parse(res.body).error, /local filesystem/);
 });
 
-test("CAD Viewer API middleware generates images only through a local backend", async () => {
-  const originalFetch = globalThis.fetch;
-  const providerCalls = [];
-  globalThis.fetch = async (url, options) => {
-    providerCalls.push({ url: String(url), options });
-    return new Response(JSON.stringify({
-      data: [{ b64_json: Buffer.from("generated").toString("base64") }]
-    }), {
-      status: 200,
-      headers: { "content-type": "application/json" }
-    });
+test("CAD Viewer API middleware creates and reads local image generation tasks", async () => {
+  const calls = [];
+  const job = {
+    id: "job-12345678",
+    clientRequestId: "request-12345678",
+    fileKey: "part.step",
+    prompt: "refine this CAD view",
+    status: "queued",
+    stage: "queued",
+    createdAt: "2026-07-23T00:00:00.000Z",
+    updatedAt: "2026-07-23T00:00:00.000Z",
+    completedAt: "",
+    revisedPrompt: "",
+    result: null,
+    error: null,
+    timings: {},
   };
+  const imageGenerationJobs = {
+    create: (request) => {
+      calls.push(request);
+      return { job, created: true };
+    },
+    get: (jobId) => jobId === job.id ? job : null,
+    readResult: () => null,
+  };
+  const middleware = createCadViewerApiMiddleware({
+    backend: { kind: "local-fs" },
+    imageGenerationJobs,
+  });
+  const createReq = createJsonRequest({
+    url: "/__cad/image-generation?file=part.step",
+    body: {
+      clientRequestId: job.clientRequestId,
+      baseUrl: "https://api.example.test/v1",
+      apiKey: "test-key",
+      model: "image-model",
+      prompt: job.prompt,
+      imageBase64: Buffer.from("view").toString("base64"),
+      imageMimeType: "image/png",
+    },
+  });
+  const createRes = createResponse();
 
-  try {
-    const middleware = createCadViewerApiMiddleware({
-      backend: { kind: "local-fs" },
-    });
-    const req = createJsonRequest({
-      url: "/__cad/image-generation",
-      body: {
-        baseUrl: "https://api.example.test/v1",
-        apiKey: "test-key",
-        model: "image-model",
-        prompt: "refine this CAD view",
-        imageBase64: Buffer.from("view").toString("base64"),
-        imageMimeType: "image/png",
-      },
-    });
-    const res = createResponse();
+  await middleware(createReq, createRes, () => {});
 
-    await middleware(req, res, () => {});
+  assert.equal(createRes.statusCode, 202);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].fileKey, "part.step");
+  assert.equal(calls[0].apiKey, "test-key");
+  assert.deepEqual(JSON.parse(createRes.body), { ok: true, job });
 
-    assert.equal(res.statusCode, 200);
-    assert.equal(providerCalls.length, 1);
-    assert.equal(providerCalls[0].url, "https://api.example.test/v1/images/edits");
-    assert.deepEqual(JSON.parse(res.body), {
-      ok: true,
-      imageBase64: Buffer.from("generated").toString("base64"),
-      mimeType: "image/png",
-      revisedPrompt: "",
-    });
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  const statusReq = { method: "GET", url: `/__cad/image-generation/${job.id}` };
+  const statusRes = createResponse();
+  await middleware(statusReq, statusRes, () => {});
+  assert.equal(statusRes.statusCode, 200);
+  assert.equal(JSON.parse(statusRes.body).job.id, job.id);
+});
+
+test("CAD Viewer API middleware serves completed image task bytes", async () => {
+  const jobId = "job-result-123456";
+  const middleware = createCadViewerApiMiddleware({
+    backend: { kind: "local-fs" },
+    imageGenerationJobs: {
+      create: () => assert.fail("create should not run"),
+      get: () => null,
+      readResult: (id) => id === jobId ? {
+        body: Buffer.from("image-bytes"),
+        filename: "result.png",
+        mimeType: "image/png",
+      } : null,
+    },
+  });
+  const req = { method: "GET", url: `/__cad/image-generation/${jobId}/result` };
+  const res = createWritableResponse();
+
+  await middleware(req, res, () => {});
+  await res.finished;
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.getHeader("content-type"), "image/png");
+  assert.equal(res.bodyText(), "image-bytes");
 });
 
 test("CAD Viewer API middleware rejects image generation for hosted backends", async () => {

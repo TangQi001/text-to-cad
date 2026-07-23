@@ -220,7 +220,8 @@ export function fileSessionSignaturesForEntry(entry) {
     stepModule: entryStepModuleSignature(entry),
     implicit: entryImplicitSignature(entry),
     urdf: entryUrdfSignature(entry),
-    largeFile: entryLargeFileSignature(entry)
+    largeFile: entryLargeFileSignature(entry),
+    imageGeneration: entryTabSignature(entry)
   };
 }
 
@@ -383,6 +384,65 @@ function normalizeLargeFileSlice(value) {
   };
 }
 
+function normalizeImageGenerationError(value) {
+  if (!isPlainObject(value)) {
+    return null;
+  }
+  const message = normalizeString(value.message);
+  if (!message) {
+    return null;
+  }
+  return {
+    code: normalizeString(value.code, "image_generation_failed"),
+    stage: normalizeString(value.stage, "failed"),
+    message,
+    retryable: normalizeBoolean(value.retryable, false),
+    providerStatus: Math.max(normalizeNumber(value.providerStatus, 0), 0)
+  };
+}
+
+function normalizeImageGenerationSlice(value) {
+  if (!isPlainObject(value)) {
+    return null;
+  }
+  const statuses = new Set([
+    "idle",
+    "submitting",
+    "queued",
+    "requesting",
+    "reading_response",
+    "downloading_result",
+    "completed",
+    "failed",
+    "interrupted"
+  ]);
+  const status = normalizeString(value.status, "idle").toLowerCase();
+  const clientRequestId = normalizeString(value.clientRequestId).slice(0, 128);
+  const jobId = normalizeString(value.jobId).slice(0, 128);
+  const interruptedBeforeTaskCreated = (
+    ["submitting", "queued", "requesting", "reading_response", "downloading_result"].includes(status)
+    && !jobId
+  );
+  return {
+    prompt: normalizeString(value.prompt).slice(0, 16_000),
+    clientRequestId,
+    jobId,
+    resultUrl: normalizeString(value.resultUrl).slice(0, 512),
+    status: interruptedBeforeTaskCreated ? "interrupted" : (statuses.has(status) ? status : "idle"),
+    stage: interruptedBeforeTaskCreated ? "submission" : normalizeString(value.stage).slice(0, 128),
+    revisedPrompt: normalizeString(value.revisedPrompt).slice(0, 16_000),
+    error: interruptedBeforeTaskCreated ? {
+      code: "job_submission_interrupted",
+      stage: "submission",
+      message: "Viewer reloaded before the image task was created",
+      retryable: true,
+      providerStatus: 0
+    } : normalizeImageGenerationError(value.error),
+    toolOpen: normalizeBoolean(value.toolOpen, false),
+    settingsOpen: normalizeBoolean(value.settingsOpen, false)
+  };
+}
+
 const FILE_SESSION_SLICE_SCHEMA = Object.freeze({
   display: {
     normalize: normalizeDisplaySlice,
@@ -418,6 +478,11 @@ const FILE_SESSION_SLICE_SCHEMA = Object.freeze({
     normalize: normalizeLargeFileSlice,
     equals: storageValuesEqual,
     signatureKey: "largeFile"
+  },
+  imageGeneration: {
+    normalize: normalizeImageGenerationSlice,
+    equals: storageValuesEqual,
+    signatureKey: "imageGeneration"
   }
 });
 
