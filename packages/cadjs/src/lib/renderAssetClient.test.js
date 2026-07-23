@@ -8,6 +8,7 @@ import {
   gitLfsPointerDetailsFromBuffer,
   loadRender3Mf,
   loadRenderArrayBuffer,
+  loadRenderDxf,
   loadRenderGcode,
   loadRenderGlb,
   loadRenderJson,
@@ -229,12 +230,13 @@ test("array buffer loads share pending fetches while aborting only the consumer"
   assert.deepEqual([...new Uint8Array(await secondLoad)], [1, 2, 3, 4]);
 });
 
-test("Git LFS pointer stubs are detected before mesh parsing", async (t) => {
+test("Git LFS pointer stubs are detected before mesh or DXF parsing", async (t) => {
   const originalFetch = globalThis.fetch;
   const oid = "b".repeat(64);
   const pointer = gitLfsPointerBuffer({ oid, size: 24992 });
   const glbUrl = `/asset-${Date.now()}-${Math.random()}.glb`;
   const threeMfUrl = `/asset-${Date.now()}-${Math.random()}.3mf`;
+  const dxfUrl = `/asset-${Date.now()}-${Math.random()}.dxf`;
 
   assert.deepEqual(gitLfsPointerDetailsFromBuffer(pointer.buffer.slice(pointer.byteOffset, pointer.byteOffset + pointer.byteLength)), {
     oid,
@@ -242,7 +244,7 @@ test("Git LFS pointer stubs are detected before mesh parsing", async (t) => {
   });
 
   globalThis.fetch = async (requestUrl) => {
-    assert.ok([glbUrl, threeMfUrl].includes(String(requestUrl)));
+    assert.ok([glbUrl, threeMfUrl, dxfUrl].includes(String(requestUrl)));
     return new Response(pointer, { status: 200 });
   };
 
@@ -257,6 +259,10 @@ test("Git LFS pointer stubs are detected before mesh parsing", async (t) => {
   await assert.rejects(
     loadRender3Mf(threeMfUrl),
     /3MF render asset is a Git LFS pointer, not downloaded mesh data/
+  );
+  await assert.rejects(
+    loadRenderDxf(dxfUrl),
+    /DXF flat pattern asset is a Git LFS pointer, not downloaded DXF data/
   );
 });
 

@@ -139,7 +139,7 @@ function displayPathFromUrl(url) {
   }
 }
 
-export function assertNotGitLfsPointer(buffer, url, assetLabel = "Render asset") {
+export function assertNotGitLfsPointer(buffer, url, assetLabel = "Render asset", contentLabel = "mesh data") {
   const pointer = gitLfsPointerDetailsFromBuffer(buffer);
   if (!pointer) {
     return;
@@ -147,7 +147,7 @@ export function assertNotGitLfsPointer(buffer, url, assetLabel = "Render asset")
   const sizeText = pointer.size !== null ? ` Expected LFS object size: ${pointer.size} bytes.` : "";
   const oidText = pointer.oid ? ` sha256:${pointer.oid}.` : "";
   throw new Error(
-    `${assetLabel} is a Git LFS pointer, not downloaded mesh data: ${displayPathFromUrl(url)}.${oidText}${sizeText} Fetch the LFS object for this file and reload the viewer.`
+    `${assetLabel} is a Git LFS pointer, not downloaded ${contentLabel}: ${displayPathFromUrl(url)}.${oidText}${sizeText} Fetch the LFS object for this file and reload the viewer.`
   );
 }
 
@@ -526,7 +526,9 @@ export function peekRenderDisplayEdgeBundle(glbUrl) {
 
 export async function loadRenderDxf(url, { signal } = {}) {
   const payload = await loadCached(dxfCache, url, async () => {
-    const dxfText = await loadRenderText(url, { signal });
+    const buffer = await loadRenderArrayBuffer(url, { signal });
+    assertNotGitLfsPointer(buffer, url, "DXF flat pattern asset", "DXF data");
+    const dxfText = new TextDecoder("utf-8").decode(buffer);
     return parseDxf(dxfText, { fileRef: "", sourceUrl: url });
   }, { cachePending: !signal });
   return finalizeCached(dxfCache, url, payload);
